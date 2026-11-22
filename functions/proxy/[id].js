@@ -84,7 +84,8 @@ export async function onRequestGet(context) {
         }
 
         try {
-            await env.DB.prepare(`
+            // 访问日志异步写入，不阻塞代理响应
+            const logPromise = env.DB.prepare(`
                 INSERT INTO logs (url, slug, ip, status, referer, ua, hostname, create_time)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             `)
@@ -97,7 +98,8 @@ export async function onRequestGet(context) {
                     userAgent || null,
                     hostName || null,
                     formattedDate || null
-                ).run();
+                ).run().catch(err => console.error('log insert failed:', err));
+            if (context.waitUntil) context.waitUntil(logPromise);
 
             // 提取原 URL 的域名部分
             const urlHostnameParts = new URL(urlQueryResult.url).hostname.split('.');
@@ -165,7 +167,7 @@ export async function onRequestGet(context) {
                     'text/xml'          // XML
                 ];
 
-                const proxyContentType = responseProxy.headers.get('Content-Type');
+                const proxyContentType = (responseProxy.headers.get('Content-Type') || '').split(';')[0].trim();
 
                 // 检查响应是否是重定向状态码
                 if (responseProxy.status > 300 && responseProxy.status < 400 && ![304, 305, 306].includes(responseProxy.status)) {
@@ -202,7 +204,8 @@ export async function onRequestGet(context) {
                 let extension = extensionMapping[proxyContentType] || '';
 
                 // 如果没有对应扩展名，则直接使用 slug 作为文件名
-                let fileName = extension ? `${slug}.${extension}` : slug;
+                const safeSlug = String(slug).replace(/[^a-zA-Z0-9._-]/g, '_');
+                let fileName = extension ? `${safeSlug}.${extension}` : safeSlug;
 
                 // 返回代理结果
                 return new Response(responseProxy.body, {
@@ -221,7 +224,8 @@ export async function onRequestGet(context) {
             }
         } catch (error) {
             // 错误处理
-            return createResponse(500, error.message);
+            console.error('proxy error:', error);
+            return createResponse(500, '服务器内部错误，请稍后重试');
         }
     }
 }

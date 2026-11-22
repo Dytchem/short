@@ -1,7 +1,17 @@
 /*
-    Copyright: c1n.top
     X-Frame-Options: SAMEORIGIN
-    X-Powered-By: github:molikai-work/short
+    X-Content-Type-Options: nosniff
+    Referrer-Policy: strict-origin-when-cross-origin
+    X-Powered-By: Dytchem/short
+
+/css/*
+    Cache-Control: public, max-age=86400
+
+/js/*
+    Cache-Control: public, max-age=86400
+
+/asset/*
+    Cache-Control: public, max-age=86400
 
 /LICENSE
     Content-Disposition: inline

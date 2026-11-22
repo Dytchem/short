@@ -57,8 +57,14 @@ export async function onRequest(context) {
         return createResponse(405, `${shortName}API 运行正常，请使用 POST 方法创建短链。`);
     }
 
-    // 从 JSON 数据中解构出进入参数
-    const { url, slug, password, email, turnstileToken } = await request.json();
+    // 从 JSON 数据中解构出进入参数（JSON 不合法时返回 400 而不是抛 500）
+    let payload;
+    try {
+        payload = await request.json();
+    } catch (jsonError) {
+        return createResponse(400, '请求体不是合法的 JSON');
+    }
+    const { url, slug, password, email, turnstileToken } = payload;
 
     // 开始进入参数检查
     // 1. 必须有 URL 参数 ------------------------------
@@ -67,8 +73,18 @@ export async function onRequest(context) {
     }
 
     // 2. URL 必须符合要求 ------------------------------
-    // url 格式检查
-    if (!/^(https?):\/\/.{3,}/.test(url)) {
+    // 严格校验：必须能被 URL 解析、协议只允许 http/https，
+    // 且原始字符串不得含空白、引号、尖括号、反引号等可打穿跳转页 HTML/JS 的字符
+    let parsedUrl = null;
+    try {
+        parsedUrl = new URL(url);
+    } catch (e) {
+        return createResponse(422, 'URL 格式不合规范');
+    }
+    if ((parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:')
+        || url.length < 10
+        || /[\s<>"'`\\]/.test(url)
+        || /[\u0000-\u001f\u007f]/.test(url)) {
         return createResponse(422, 'URL 格式不合规范');
     }
 
@@ -259,7 +275,8 @@ export async function onRequest(context) {
             link: `${customOrigin}/${generatedSlug}`
         });
     } catch (error) {
-        // 错误处理
-        return createResponse(500, error.message);
+        // 错误处理：内部细节只记日志，不回给客户端（避免泄露实现信息）
+        console.error('create error:', error);
+        return createResponse(500, '服务器内部错误，请稍后重试');
     }
 }

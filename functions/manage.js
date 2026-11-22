@@ -6,7 +6,7 @@
 
 // functions/manage.js
 
-import { allowOrigin, createResponse, shortName, hashPassword, specialDomains } from './utils';
+import { allowOrigin, createResponse, shortName, hashPassword, verifyPasswordHash, isLegacyHash, specialDomains } from './utils';
 
 // 处理短链管理的函数
 export async function onRequest(context) {
@@ -51,7 +51,7 @@ export async function onRequest(context) {
         requestBody = await request.json();
     } catch (jsonError) {
         // JSON 解析失败
-        return createResponse(400, `JsonError: ${jsonError.message}`);
+        return createResponse(400, '请求体不是合法的 JSON');
     }
 
     // 从 JSON 数据中解构出进入参数
@@ -69,11 +69,19 @@ export async function onRequest(context) {
         return createResponse(422, '请填写你要管理的短链的密码');
     }
 
-    if ((operation === "update-url" || newUrl) && !/^(https?):\/\/.{3,}/.test(newUrl)) {
-        return createResponse(422, '新 URL 格式不合规范');
+    if (operation === "update-url" || newUrl) {
+        // 与创建时同一口径的严格校验（防存储型 XSS 打穿跳转页）
+        let parsedNewUrl = null;
+        try { parsedNewUrl = newUrl ? new URL(newUrl) : null; } catch (e) { /* 下面统一拦截 */ }
+        if (!parsedNewUrl
+            || (parsedNewUrl.protocol !== 'http:' && parsedNewUrl.protocol !== 'https:')
+            || /[\s<>"'`\\]/.test(newUrl)
+            || /[\u0000-\u001f\u007f]/.test(newUrl)) {
+            return createResponse(422, '新 URL 格式不合规范');
+        }
     }
 
-    if ((operation === "update-slug" || newSlug) && (newSlug.length < 4 || newSlug.length > 16 || !/^(?!\.)[a-zA-Z0-9\u4e00-\u9fa5\u3400-\u4DBf]+(\.(?![a-zA-Z])[a-zA-Z0-9\u4e00-\u9fa5\u3400-\u4DBf]+)*$/.test(newSlug))) {
+    if ((operation === "update-slug" || newSlug) && (!newSlug || newSlug.length < 4 || newSlug.length > 16 || !/^(?!\.)[a-zA-Z0-9\u4e00-\u9fa5\u3400-\u4DBf]+(\.(?![a-zA-Z])[a-zA-Z0-9\u4e00-\u9fa5\u3400-\u4DBf]+)*$/.test(newSlug))) {
         return createResponse(422, '新 Slug 4-16位且不能以点开头或结束、含有部分特殊字符和扩展名');
     }
 
@@ -109,7 +117,7 @@ export async function onRequest(context) {
 
     async function verifyPassword(slug, password) {
         try {
-            // 验证密码
+            // 验证密码（支持新 PBKDF2 格式与旧无盐 SHA-256 格式）
             const result = await env.DB.prepare(`
                 SELECT password FROM links WHERE slug = ? LIMIT 1
             `).bind(slug).first();
@@ -118,9 +126,21 @@ export async function onRequest(context) {
                 return false;
             }
 
-            const hashedPassword = await hashPassword(password);
+            const valid = await verifyPasswordHash(password, result.password);
 
-            return result.password === hashedPassword;
+            // 存量旧哈希校验通过后，顺手升级为 PBKDF2 存储（用户无感）
+            if (valid && isLegacyHash(result.password)) {
+                try {
+                    const upgraded = await hashPassword(password);
+                    await env.DB.prepare(`
+                        UPDATE links SET password = ? WHERE slug = ?
+                    `).bind(upgraded, slug).run();
+                } catch (upgradeError) {
+                    console.error('password hash upgrade failed:', upgradeError);
+                }
+            }
+
+            return valid;
         } catch (error) {
             // 错误处理
             throw new Error(`VerifyPassword: ${error.message}`);
@@ -234,7 +254,8 @@ export async function onRequest(context) {
             return createResponse(200, '网址已成功更新');
         } catch (error) {
             // 处理更新网址错误
-            return createResponse(500, `UpdateUrl: ${error.message}`);
+            console.error('UpdateUrl failed:', error);
+            return createResponse(500, '服务器内部错误，请稍后重试');
         }
     }
 
@@ -262,7 +283,8 @@ export async function onRequest(context) {
             return createResponse(200, 'Slug 已成功更新');
         } catch (error) {
             // 错误处理
-            return createResponse(500, `UpdateSlug: ${error.message}`);
+            console.error('UpdateSlug failed:', error);
+            return createResponse(500, '服务器内部错误，请稍后重试');
         }
     }
 
@@ -281,7 +303,8 @@ export async function onRequest(context) {
             return createResponse(200, '密码已成功更新');
         } catch (error) {
             // 错误处理
-            return createResponse(500, `UpdatePassword: ${error.message}`);
+            console.error('UpdatePassword failed:', error);
+            return createResponse(500, '服务器内部错误，请稍后重试');
         }
     }
 
@@ -303,7 +326,8 @@ export async function onRequest(context) {
             return createResponse(200, `短链状态已成功切换`);
         } catch (error) {
             // 错误处理
-            return createResponse(500, `ToggleStatus: ${error.message}`);
+            console.error('ToggleStatus failed:', error);
+            return createResponse(500, '服务器内部错误，请稍后重试');
         }
     }
 
@@ -318,7 +342,8 @@ export async function onRequest(context) {
             return createResponse(200, '短链已成功删除');
         } catch (error) {
             // 错误处理
-            return createResponse(500, `DeleteSlug: ${error.message}`);
+            console.error('DeleteSlug failed:', error);
+            return createResponse(500, '服务器内部错误，请稍后重试');
         }
     }
 }

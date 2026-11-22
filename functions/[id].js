@@ -6,7 +6,7 @@
 
 // functions/[id].js
 
-import { createResponse, shortName, htmlHead, adminEmail, noscript, specialDomains, footer } from './utils';
+import { createResponse, shortName, htmlHead, adminEmail, noscript, specialDomains, footer, escapeHtml } from './utils';
 
 import html404 from '../404.html'; // 导入 404 页面
 
@@ -102,7 +102,8 @@ export async function onRequestGet(context) {
         }
 
         try {
-            await env.DB.prepare(`
+            // 访问日志改为异步写入（waitUntil）：不阻塞跳转响应，写失败也不影响跳转
+            const logPromise = env.DB.prepare(`
                 INSERT INTO logs (url, slug, ip, status, referer, ua, hostname, create_time)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             `)
@@ -115,7 +116,8 @@ export async function onRequestGet(context) {
                     userAgent || null,
                     hostName || null,
                     formattedDate || null
-                ).run();
+                ).run().catch(err => console.error('log insert failed:', err));
+            if (context.waitUntil) context.waitUntil(logPromise);
 
             const banRedirectPage = `<!DOCTYPE html>
                 <!-- 此"解析URL被拒绝"页面由系统自动生成 -->
@@ -216,12 +218,17 @@ export async function onRequestGet(context) {
                 }
             }
 
-            // 构建带自动跳转的页面
+            // 构建带自动跳转的页面（目标 URL/slug 均为用户可控输入，拼 HTML 前必须转义，
+            // 拼进 JS 字符串时用 JSON.stringify 编码，杜绝存储型 XSS）
+            const safeUrlHtml = escapeHtml(urlQueryResult.url);
+            // JSON.stringify 之外还必须转义 < >：否则 URL 里的 </script> 会直接闭合脚本块
+            const safeUrlJs = JSON.stringify(urlQueryResult.url)
+                .replace(/</g, '\\u003c').replace(/>/g, '\\u003e').replace(/&/g, '\\u0026');
             const redirectPage = `<!DOCTYPE html>
                 <!-- 此"带你到目标页面"页面由系统自动生成 -->
                 <html lang="zh-CN">
                 <head>
-                    <title>${shortName} - 带你到目标页面: 由 #${slug} 跳转</title>
+                    <title>${shortName} - 带你到目标页面: 由 #${escapeHtml(slug)} 跳转</title>
                     ${htmlHead}
                 </head>
                 <body>
@@ -229,7 +236,7 @@ export async function onRequestGet(context) {
                     <h1>带你到目标页面</h1>
                     <p>状态：正常</p>
                     <p>这将在 <span id="countdown"></span> 秒后自动跳转。<br />如果页面没有自动跳转，请点击此链接：</p>
-                    <a href="${urlQueryResult.url}" rel="external nofollow noopener noreferrer" style="word-wrap:break-word;overflow-wrap:break-word;white-space:normal;">${urlQueryResult.url}</a>
+                    <a href="${safeUrlHtml}" rel="external nofollow noopener noreferrer" style="word-wrap:break-word;overflow-wrap:break-word;white-space:normal;">${safeUrlHtml}</a>
                     ${noscript}
                     <p class="contact">对此目标 Url 有疑问？请联系：<a href="mailto:${adminEmail}">${adminEmail}</a>，寻求短链支持。</p>
                     ${footer}
@@ -244,7 +251,7 @@ export async function onRequestGet(context) {
                                 setTimeout(updateCountdown, 1000);
                             } else {
                                 var newLink = document.createElement('a');
-                                newLink.setAttribute('href', "${urlQueryResult.url}");
+                                newLink.setAttribute('href', ${safeUrlJs});
                                 newLink.setAttribute('rel', 'external nofollow noopener noreferrer');
                                 newLink.click();
                             }
@@ -274,14 +281,14 @@ export async function onRequestGet(context) {
                     <h1>发生内部错误</h1>
                     <p>某些内部函数可能未正常执行，但我们仍会尝试解析目标地址。</p>
                     <p>这不是您的问题，是我们。<br />请向我们报告问题，然后等待我们排查错误。</p>
-                    <p><span class="warning">注意，错误情况下展示的链接很可能未经过安全检查。</span><br />然后点击此链接：<a href="${urlQueryResult?.url || '#'}" rel="external nofollow noopener noreferrer">${urlQueryResult?.url || '[无法获取链接信息]'}</a>，以进行跳转。</p>
+                    <p><span class="warning">注意，错误情况下展示的链接很可能未经过安全检查。</span><br />然后点击此链接：<a href="${escapeHtml(urlQueryResult?.url || '#')}" rel="external nofollow noopener noreferrer">${escapeHtml(urlQueryResult?.url || '[无法获取链接信息]')}</a>，以进行跳转。</p>
                     <p>或者<a href="/">返回主页</a>。</p>
                     <br />
                     <p class="contact">对此目标 Url 或是页面有疑问？请联系：<a href="mailto:${adminEmail}">${adminEmail}</a>，寻求短链支持。</p>
-                    <p>错误信息：</p>
-                    <pre class="error-message">${error.message}</pre>
                 </body>
-                </html>`;
+                </html>`
+            // 内部错误细节只记日志，不回显给访客
+            console.error('redirect error:', error);;
 
             return new Response(errorRedirectPage, {
                 status: 500,
